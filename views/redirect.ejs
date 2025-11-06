@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Redirecting...</title>
+</head>
+<body onload="document.forms[0].submit()">
+  <p>Redirecting to payment gateway...</p>
+  <form method="POST" action="<%= test_url %>">
+    <input type="hidden" name="me_id" value="<%= me_id %>">
+    <input type="hidden" name="merchant_request" value="<%= encrypted_data %>">
+    <input type="hidden" name="hash" value="<%= encrypted_hash %>">
+  </form>
+</body>
+</html>
