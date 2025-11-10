@@ -13,8 +13,14 @@ app.use(express.urlencoded({ extended: true }));
 const DEFAULT_MERCHANT_ID = "202508080001";
 const DEFAULT_MERCHANT_KEY = "IG3CNW5uNrUO2mU2htUOWb9rgXCF7XMAXmL63d7wNZo=";
 const AGGREGATOR_ID = "yagout";
-const SUCCESS_URL = "http://192.168.1.69:3000/success";
-const FAILURE_URL = "http://192.168.1.69:3000/failure";
+// const SUCCESS_URL = "http://192.168.1.21:3000/success";
+// const FAILURE_URL = "http://192.168.1.21:3000/failure";
+// const TEST_URL = "https://uatcheckout.yagoutpay.com/ms-transaction-core-1-0/paymentRedirection/checksumGatewayPage";
+// const CURRENCY_FROM = "ETH";
+// const CURRENCY_TO = "ETB";
+
+const SUCCESS_URL = "https://yagoutpayihamimauto.easyapplicantflow.com/success";
+const FAILURE_URL = "https://yagoutpayihamimauto.easyapplicantflow.com/failure";
 const TEST_URL = "https://uatcheckout.yagoutpay.com/ms-transaction-core-1-0/paymentRedirection/checksumGatewayPage";
 const CURRENCY_FROM = "ETH";
 const CURRENCY_TO = "ETB";
@@ -139,49 +145,6 @@ app.get('/transaction', (req, res) => {
 });
 
 
-// app.post('/transaction', (req, res) => {
-//   const amount = req.body.amount || '100';
-//   const mobileNumber = req.body.mobile_number || '';
-//   const userId = req.body.user_id || 'UNKNOWN';
-
-//   console.log(`mmmmmmmmmmmmmmmmmmmmmmmmmm: phone: ${mobileNumber} userId: ${userId}`)
-
-//   let orderNumber = req.body.order_number;
-//   if (!orderNumber) {
-//     orderNumber = "ORDER_" + crypto.randomBytes(4).toString('hex');
-//   }
-
-//   // Save user info temporarily
-//   userCache[orderNumber] = { userId, phoneNumber: mobileNumber };
-
-//   const txnDetails = `${AGGREGATOR_ID}|${DEFAULT_MERCHANT_ID}|${orderNumber}|${amount}|ETH|ETB|SALE|${SUCCESS_URL}|${FAILURE_URL}|WEB`;
-//   const custDetails = `||${mobileNumber}||Y`; 
-//   const fullMessage = [
-//     txnDetails,
-//     "|||",
-//     "||||",
-//     custDetails,
-//     "||||",
-//     "||||||",
-//     "||",
-//     "",
-//     "||||"
-//   ].join("~");
-
-//   const encryptedData = encrypt(fullMessage, DEFAULT_MERCHANT_KEY);
-//   const hashInput = `${DEFAULT_MERCHANT_ID}~${orderNumber}~${amount}~${CURRENCY_FROM}~${CURRENCY_TO}`;
-//   const encryptedHash = encrypt(generateSha256Hash(hashInput), DEFAULT_MERCHANT_KEY);
-
-//   res.render('redirect', { 
-//     test_url: TEST_URL,
-//     me_id: DEFAULT_MERCHANT_ID,
-//     encrypted_data: encryptedData,
-//     encrypted_hash: encryptedHash
-//   });
-// });
-
-
-
 app.post('/transaction', (req, res) => {
   const amount = req.body.amount || '100';
   const mobileNumber = req.body.mobile_number || '';
@@ -247,24 +210,25 @@ app.post('/success', (req, res) => {
       time: parts[7],
       transactionRef: parts[8],
       aggregatorTxnId: parts[9],
-      status: parts[10],
+      status: (parts[10] || '').trim().toUpperCase(),  // ✅ normalize
       errorCode: parts[11],
       errorDesc: parts[12],
-      paidAmount: parseFloat(parts[13])
+      paidAmount: parseFloat(parts[13]) || 0
     };
 
-    // 🔹 Fetch user info (user_id, phone_number) from the DB using order_id
-    const getUserQuery = `
-      SELECT user_id, phone_number 
+    console.log("🔍 Parsed Transaction:", txn);
+
+    const getTxnQuery = `
+      SELECT user_id, phone_number, status 
       FROM transactions 
       WHERE order_id = ? 
       LIMIT 1
     `;
 
-    db.query(getUserQuery, [txn.orderId], (err, results) => {
+    db.query(getTxnQuery, [txn.orderId], (err, results) => {
       if (err) {
-        console.error("❌ Error fetching user info:", err);
-        return res.render('payment_failure', { error: "Database error while fetching user info", response: null });
+        console.error("❌ Error fetching transaction:", err);
+        return res.render('payment_failure', { error: "Database error while fetching transaction", response: null });
       }
 
       if (results.length === 0) {
@@ -272,13 +236,17 @@ app.post('/success', (req, res) => {
         return res.render('payment_failure', { error: "Transaction not found for this order ID", response: null });
       }
 
-      const userId = results[0].user_id;
-      const phoneNumber = results[0].phone_number;
+      const { user_id: userId, phone_number: phoneNumber, status: existingStatus } = results[0];
 
-      console.log(`👤 User found: ${userId}, Phone: ${phoneNumber}`);
+      console.log(`nnnnnnnnnnnnnnnnnnnn: existingStatus: ${existingStatus}`);
+      const normalizedExisting = (existingStatus || '').trim().toUpperCase();
+      console.log(`nnnnnnnnnnnnnnnnnnnn: normalizedExisting: ${existingStatus}`);
 
-      // 🔹 Update user’s balance if transaction is successful
-      if (userId) {
+      console.log(`👤 User: ${userId}, Phone: ${phoneNumber}, Existing Status: ${normalizedExisting}, New Status: ${txn.status}`);
+
+      // ✅ Only update balance if this is the first success
+      if (txn.status === 'SUCCESSFUL' && normalizedExisting !== 'SUCCESSFUL' && userId) {
+        console.log(`💰 Crediting user ${userId} with ${txn.paidAmount}`);
         const updateUserBalanceSql = `
           UPDATE users 
           SET balance = balance + ?, 
@@ -287,11 +255,15 @@ app.post('/success', (req, res) => {
         `;
         db.query(updateUserBalanceSql, [txn.paidAmount, userId], (err2) => {
           if (err2) console.error("❌ Failed to update user balance:", err2);
-          else console.log(`💰 User ${userId} balance increased by ${txn.paidAmount}`);
+          else console.log(`✅ User ${userId} balance updated.`);
         });
+      } else if (normalizedExisting === 'SUCCESSFUL') {
+        console.log(`⚠️ Transaction ${txn.orderId} already SUCCESS — skipping double credit.`);
+      } else {
+        console.log(`ℹ️ Transaction ${txn.orderId} not successful — no balance update.`);
       }
 
-      // 🔹 Save or update the transaction record with the final details
+      // ✅ Update transaction record in all cases
       const updateTxnSql = `
         UPDATE transactions 
         SET 
@@ -345,33 +317,68 @@ app.post('/failure', (req, res) => {
 
   try {
     const decryptedResponse = decrypt(txnResponse, DEFAULT_MERCHANT_KEY);
-    console.log("Decrypted Failed Response:", decryptedResponse);
+    console.log("🔻 Decrypted Failed Response:", decryptedResponse);
 
     const parts = decryptedResponse.split('|');
     const txn = {
+      aggregator: parts[0],
+      merchantId: parts[1],
       orderId: parts[2],
-      errorCode: parts[11],
-      errorDesc: parts[12],
-      status: parts[10] || 'FAILED'
+      amount: parseFloat(parts[3]) || 0,
+      currencyFrom: parts[4],
+      currencyTo: parts[5],
+      date: parts[6],
+      time: parts[7],
+      transactionRef: parts[8],
+      aggregatorTxnId: parts[9],
+      status: (parts[10] || 'FAILED').trim().toUpperCase(),
+      errorCode: parts[11] || null,
+      errorDesc: parts[12] || null
     };
 
+    console.log("🧾 Parsed Failed Transaction:", txn);
+
+    // ✅ Update database with full transaction data (even on failure)
     const sqlUpdate = `
       UPDATE transactions
-      SET status = ?, error_code = ?, error_desc = ?
+      SET 
+        transaction_ref = ?, 
+        aggregator_txn_id = ?, 
+        status = ?, 
+        error_code = ?, 
+        error_desc = ?, 
+        txn_date = ?, 
+        txn_time = ?
       WHERE order_id = ?
     `;
-    db.query(sqlUpdate, [txn.status, txn.errorCode, txn.errorDesc, txn.orderId], (err) => {
-      if (err) console.error("❌ Failed to update failed transaction:", err);
-      else console.log(`⚠️ Transaction ${txn.orderId} marked as FAILED`);
+
+    db.query(sqlUpdate, [
+      txn.transactionRef,
+      txn.aggregatorTxnId,
+      txn.status,
+      txn.errorCode,
+      txn.errorDesc,
+      txn.date,
+      txn.time,
+      txn.orderId
+    ], (err) => {
+      if (err) {
+        console.error("❌ Failed to update failed transaction:", err);
+      } else {
+        console.log(`⚠️ Transaction ${txn.orderId} marked as FAILED (details saved).`);
+      }
     });
 
+    // Clean up temporary cache
     delete userCache[txn.orderId];
+
     res.render('payment_failure', { error: null, response: decryptedResponse });
   } catch (err) {
-    console.error("Decryption error (failure):", err);
+    console.error("❌ Decryption error (failure):", err);
     res.render('payment_failure', { error: `Decryption failed: ${err.message}`, response: null });
   }
 });
+
 
 
 
